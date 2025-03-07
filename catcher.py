@@ -1,15 +1,21 @@
-from flask import Flask, request, jsonify, render_template_string, send_from_directory
+from flask import Flask, request, jsonify, render_template_string, send_from_directory, Response
 import sqlite3
 import time
 import os
 import json
 import hashlib
 import mimetypes
+from functools import wraps
 
 # ToDo: Write code to handle more than one file/post data:
 # curl.exe -F "image2=@C:\test.bat"  -F "filecomment=This is an image file"  -F "image=@C:\malware\putty.exe" localhost:5000/curltest.php
+# curl.exe -d "name=curl" -d "tool=cmdline" http://localhost:5000/bin
+# curl.exe --upload-file http://localhost:5000/filename
+#  -T, --upload-file,  --data-binary, --data-urlencode and --data-raw
+# https://curl.se/docs/manpage.html
 
 # ToDo: Handle 'sqlite3.OperationalError: database is locked' exception
+# ToDo: Support basic http auth
 
 
 app = Flask(__name__)
@@ -18,10 +24,45 @@ DB_FILE = "data.db"
 STATIC_DIR = "static"
 UPLOADS_DIR = "uploads"
 
+# --- Basic HTTP Auth ---
+USERNAME = "user"
+PASSWORD = "password"
+
+def check_auth(username, password):
+    """This function is called to check if a username /
+    password combination is valid."""
+    return username == USERNAME and password == PASSWORD
+
+def authenticate():
+    """Sends a 401 response that enables basic auth"""
+    return Response(
+    'Access Denied', 401,
+    {'WWW-Authenticate': 'Basic realm="Login Required"'})
+
+def requires_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or not check_auth(auth.username, auth.password):
+            return authenticate()
+        return f(*args, **kwargs)
+    return decorated
+# --- End Basic HTTP Auth ---
+
 def is_text_file(file_path):
-    """Check if a file is a text-based file using MIME type detection."""
-    mime_type, _ = mimetypes.guess_type(file_path)
-    return mime_type and mime_type.startswith("text")
+    """Check if a file is mostly readable english text"""
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read(500)  # Read the first 500 characters
+            # Check if the text contains mostly printable characters
+            printable_ratio = sum(1 for char in text if char.isprintable()) / len(text) if text else 0
+            return printable_ratio > 0.9  # Adjust threshold as needed
+    except UnicodeDecodeError:
+        return False
+    except Exception:
+        return False
+
+    
 
 def is_image_file(file_path):
     """Check if a file is an image file using MIME type detection."""
@@ -43,8 +84,7 @@ def init_db():
                     file_name TEXT,
                     original_file_name TEXT,
                     file_content TEXT,
-                    path TEXT,
-                    raw_post_data TEXT
+                    path TEXT
                  )''')
     conn.commit()
     conn.close()
@@ -82,7 +122,7 @@ def basic_upload():
     '''
 
 @app.route('/', defaults={'path': ''})
-@app.route('/<path:path>',methods=['GET', 'POST'])
+@app.route('/<path:path>',methods=['GET', 'POST','PUT'])
 def capture_request(path):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -94,48 +134,100 @@ def capture_request(path):
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     full_path = request.path
     raw_post_data = None
-
     file_name = None
     original_file_name = None
     file_content = None  # Store text-based file content
     mime_type = None
+    file_ext = None
     body = ""
 
-    if request.method == 'POST':
-        # Handle file uploads
-        if request.files:
-            if 'file' in request.files:
-                file = request.files['file']
-                original_file_name = file.filename
-                file_hash = hash_file(file)
-                file_ext = os.path.splitext(original_file_name)[1]
-                file_name = f"{UPLOADS_DIR}/{file_hash}{file_ext}"
+    if request.method == 'POST' or request.method == 'PUT':
+        #if 'file' in request.files:
+        for fileString in request.files:
+            raw_post_data = None
+            file_name = None
+            original_file_name = None
+            file_content = None  # Store text-based file content
+            mime_type = None
+            file_ext = None
+            body = ""
+            file = request.files[fileString]
+            original_file_name = file.filename
+            file_hash = hash_file(file)
+            file_ext = os.path.splitext(original_file_name)[1]
+            file_name = f"{UPLOADS_DIR}/{file_hash}{file_ext}"
 
-                if not os.path.exists(file_name):
-                    file.save(file_name)
-                mime_type, _ = mimetypes.guess_type(file_name)
+            if not os.path.exists(file_name):
+                file.save(file_name)
+            mime_type, _ = mimetypes.guess_type(file_name)
 
-                # Check if file is text-based and read content
-                if is_text_file(file_name):
-                    try:
-                        with open(file_name, "r", encoding="utf-8", errors="ignore") as f:
-                            file_content = f.read(500)  # Limit to 500 characters to prevent UI slowdown
-                            body = file_content
-                    except Exception as e:
-                        body = f"[Error reading file: {str(e)}]"
-                elif is_image_file(file_name):
-                    body = "Image File"
-                else:
-                    body = "Binary file"
-        else:
-           
-            #get raw post data
-            raw_post_data = request.get_data(as_text=True)
-            body = raw_post_data
+            # Check if file is text-based and read content
+            if is_text_file(file_name):
+                try:
+                    with open(file_name, "r", encoding="utf-8", errors="ignore") as f:
+                        file_content = f.read(500)  # Limit to 500 characters to prevent UI slowdown
+                        body = file_content
+                except Exception as e:
+                    body = f"[Error reading file: {str(e)}]"
+            elif is_image_file(file_name):
+                body = "Image File"
+            else:
+                body = "Binary file"
+            c.execute("INSERT INTO logs (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, full_path))
+        # End file for loop
+
+        for form in request.form:
+            file_name = None
+            original_file_name = None
+            file_content = None  
+            mime_type = None
+            file_ext = None
+            body = form + " = " + request.form[form]
+            c.execute("INSERT INTO logs (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, full_path))
+        # End form for loop
+
+        #get raw post data
+        raw_post_data = request.get_data() # as_text=True
+        if raw_post_data != '':
+            file_name = None
+            original_file_name = None
+            file_content = None  
+            mime_type = None
+            body = None
+            file_ext = ""
+
+            
+            # sha-256 this string raw_post_data, then save the file with the hash as the file name and original extention
+            file_hash = hashlib.sha256(raw_post_data).hexdigest()
+            file_ext = os.path.splitext(path)[1]
+            original_file_name = (path.split('/')[-1]).replace('..', '')
+            file_name = f"{UPLOADS_DIR}/{file_hash}{file_ext}"
+
+            if not os.path.exists(file_name):
+                open(file_name, "wb").write(raw_post_data)
+            mime_type, _ = mimetypes.guess_type(file_name)
+            # Based on mime_type, assign proper exention and rename the file
+
+            # Check if file is text-based and read content
+            if mime_type is None and is_text_file(file_name):
+                try:
+                    with open(file_name, "r", encoding="utf-8", errors="ignore") as f:
+                        file_content = f.read(500)  # Limit to 500 characters to prevent UI slowdown
+                        body = file_content
+                except Exception as e:
+                    body = f"[Error reading file: {str(e)}]"
+            elif mime_type is None and is_image_file(file_name):
+                body = "Image File"
+            else:
+                body = "Binary file"
+
+            c.execute("INSERT INTO logs (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, full_path))
+
 
     # Store in DB
-    c.execute("INSERT INTO logs (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, path, raw_post_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-              (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, full_path, raw_post_data))
     conn.commit()
     conn.close()
 
@@ -146,7 +238,7 @@ def get_logs():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
 
-    c.execute("SELECT * FROM logs ORDER BY id DESC")
+    c.execute("SELECT * FROM logs ORDER BY timestamp ASC")
     logs = c.fetchall()
     conn.close()
 
@@ -163,14 +255,14 @@ def get_logs():
             "file_name": log[7],
             "original_file_name": log[8],
             "file_content": log[9],
-            "path": log[10],
-            "raw_post_data": log[11]
+            "path": log[10]
         })
 
     return jsonify(formatted_logs)
 
 
 @app.route('/view', methods=['GET'])
+@requires_auth
 def view_logs():
     return render_template_string('''
     <!DOCTYPE html>
@@ -193,12 +285,11 @@ def view_logs():
                     <th>Method</th>
                     <th>Path</th>
                     <th>Headers</th>
-                    <th>Params</th>
-                    <th>Body</th>
+                    <th>URL Params</th>
+                    <th>Body (partial)</th>
                     <th>Original Filename</th>
                     <th>Mime Type</th>
                     <th>File</th>
-                    <th>Raw POST Data</th>
                 </tr>
             </thead>
             <tbody></tbody>
@@ -212,14 +303,10 @@ def view_logs():
                 let paramStr = Object.entries(row.params).map(([key, value]) => `${key}: ${value}`).join("<br>");
                 let headerStr = Object.entries(row.headers).map(([key, value]) => `${key}: ${value}`).join("<br>");
                 let bodyStr = "<pre>" + row.body + "</pre>";
-                let original_file_name = "N/A";
+                let original_file_name = "";
 
-                let fileDisplay = "N/A";
-                if (row.file_content) {
-                    let formattedFileContent = row.file_content.replace(/\\r\\n|\\n|\\r/g, "<br>");
-                    fileDisplay = `<pre>${formattedFileContent}</pre>`; // Display text file content
-                } else if (row.file_name) {
-                                   
+                let fileDisplay = "";
+                if (row.file_name) { 
                     if (row.mime_type.startsWith('image/')) {
                         fileDisplay = `<img src="${row.file_name}" alt="${row.original_file_name}" style="max-width: 200px; max-height: 200px;">`;
                     } else {
@@ -227,7 +314,7 @@ def view_logs():
                     }
                 }
 
-                let raw_post_display = row.raw_post_data ? `<pre>${row.raw_post_data}</pre>` : 'N/A';
+                let raw_post_display = row.raw_post_data ? `<pre>${row.raw_post_data}</pre>` : '';
 
                 table.row.add([
                     row.id,
@@ -237,10 +324,10 @@ def view_logs():
                     headerStr,
                     paramStr,
                     bodyStr,
-                    row.original_file_name || "N/A",
-                    row.mime_type || "N/A",
-                    fileDisplay,
-                    raw_post_display
+                    row.original_file_name || "",
+                    row.mime_type || "",
+                    fileDisplay
+                    
                 ]).draw();
             });
         });
