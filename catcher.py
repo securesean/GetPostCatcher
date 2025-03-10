@@ -7,6 +7,7 @@ import hashlib
 import mimetypes
 from functools import wraps
 
+# ToDo: Get image display to work againdis
 # ToDo: Write code to handle more than one file/post data:
 # curl.exe -F "image2=@C:\test.bat"  -F "filecomment=This is an image file"  -F "image=@C:\malware\putty.exe" localhost:5000/curltest.php
 # curl.exe -d "name=curl" -d "tool=cmdline" http://localhost:5000/bin
@@ -23,6 +24,7 @@ app = Flask(__name__)
 DB_FILE = "data.db"
 STATIC_DIR = "static"
 UPLOADS_DIR = "uploads"
+
 
 # --- Basic HTTP Auth ---
 USERNAME = "user"
@@ -173,7 +175,7 @@ def capture_request(path):
                 body = "Image File"
             else:
                 body = "Binary file"
-            c.execute("INSERT INTO logs (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            c.execute("INSERT INTO logs (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, full_path))
         # End file for loop
 
@@ -224,7 +226,7 @@ def capture_request(path):
                 body = "Binary file"
 
             c.execute("INSERT INTO logs (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, full_path))
+                                        (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, full_path))
 
 
     # Store in DB
