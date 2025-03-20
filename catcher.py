@@ -6,6 +6,7 @@ import json
 import hashlib
 import mimetypes
 from functools import wraps
+import socket  # Import the socket module
 
 # ToDo: Get image display to work againdis
 # ToDo: Write code to handle more than one file/post data:
@@ -16,8 +17,6 @@ from functools import wraps
 # https://curl.se/docs/manpage.html
 
 # ToDo: Handle 'sqlite3.OperationalError: database is locked' exception
-# ToDo: Support basic http auth
-
 
 app = Flask(__name__)
 
@@ -79,6 +78,8 @@ def init_db():
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT,
                     method TEXT,
+                    internal_ip TEXT,
+                    external_ip TEXT,
                     headers TEXT,
                     params TEXT,
                     body TEXT,
@@ -86,7 +87,8 @@ def init_db():
                     file_name TEXT,
                     original_file_name TEXT,
                     file_content TEXT,
-                    path TEXT
+                    path TEXT,
+                    tags TEXT
                  )''')
     conn.commit()
     conn.close()
@@ -123,6 +125,7 @@ def basic_upload():
     </form>
     '''
 
+
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>',methods=['GET', 'POST','PUT'])
 def capture_request(path):
@@ -142,6 +145,12 @@ def capture_request(path):
     mime_type = None
     file_ext = None
     body = ""
+
+    internal_ip = None
+    if "ip" in params:
+        internal_ip = params["ip"]
+
+    external_ip = request.remote_addr
 
     if request.method == 'POST' or request.method == 'PUT':
         #if 'file' in request.files:
@@ -175,8 +184,8 @@ def capture_request(path):
                 body = "Image File"
             else:
                 body = "Binary file"
-            c.execute("INSERT INTO logs (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, full_path))
+            c.execute("INSERT INTO logs (timestamp, method, internal_ip, external_ip, headers, params, body, file_name, mime_type, original_file_name, file_content, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                        (timestamp, method, internal_ip, external_ip, headers, params, body, file_name, mime_type, original_file_name, file_content, full_path))
         # End file for loop
 
         for form in request.form:
@@ -186,8 +195,8 @@ def capture_request(path):
             mime_type = None
             file_ext = None
             body = form + " = " + request.form[form]
-            c.execute("INSERT INTO logs (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, full_path))
+            c.execute("INSERT INTO logs (timestamp, method, internal_ip, external_ip, headers, params, body, file_name, mime_type, original_file_name, file_content, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                        (timestamp, method, internal_ip, external_ip, headers, params, body, file_name, mime_type, original_file_name, file_content, full_path))
         # End form for loop
 
         #get raw post data
@@ -199,6 +208,7 @@ def capture_request(path):
             mime_type = None
             body = None
             file_ext = ""
+
 
             
             # sha-256 this string raw_post_data, then save the file with the hash as the file name and original extention
@@ -225,9 +235,11 @@ def capture_request(path):
             else:
                 body = "Binary file"
 
-            c.execute("INSERT INTO logs (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                        (timestamp, method, headers, params, body, file_name, mime_type, original_file_name, file_content, full_path))
-
+            c.execute("INSERT INTO logs (timestamp, method, internal_ip, external_ip, headers, params, body, file_name, mime_type, original_file_name, file_content, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                        (timestamp, method, internal_ip, external_ip, headers, params, body, file_name, mime_type, original_file_name, file_content, full_path))
+    else: # If not POST or PUT aka - should just be GET
+        c.execute("INSERT INTO logs (timestamp, method, internal_ip, external_ip, headers, params) VALUES (?, ?, ?, ?, ?, ?)",
+                                    (timestamp, method, internal_ip, external_ip, headers, params)) 
 
     # Store in DB
     conn.commit()
@@ -235,7 +247,36 @@ def capture_request(path):
 
     return jsonify({"message": "Captured"}), 200
 
+
+@app.route('/favicon.ico')
+@requires_auth
+def favicon():
+    return send_from_directory(STATIC_DIR, 'favicon.ico')
+   
+    
+@app.route('/logs_sql', methods=['GET','POST'])
+@requires_auth
+def get_logs_sql():
+    if request.method == 'POST':
+        sql_query = request.form.get('sql_query')
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        try:
+            c.execute(sql_query)
+            if sql_query.lower().startswith("select"):
+                results = [dict((c.description[i][0], value) \
+                       for i, value in enumerate(row)) for row in c.fetchall()]
+            else:
+                results = [{"message":"Query Executed"}]
+            conn.commit()
+        except sqlite3.Error as e:
+            results = [{"error": str(e)}]
+        finally:
+            conn.close()
+        return jsonify(results)
+
 @app.route('/logs', methods=['GET'])
+@requires_auth
 def get_logs():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -250,14 +291,16 @@ def get_logs():
             "id": log[0],
             "timestamp": log[1],
             "method": log[2],
-            "headers": json.loads(log[3]),
-            "params": json.loads(log[4]),
-            "body": log[5],
-            "mime_type": log[6],
-            "file_name": log[7],
-            "original_file_name": log[8],
-            "file_content": log[9],
-            "path": log[10]
+            "internal_ip": log[3],
+            "external_ip": log[4],
+            "headers": json.loads(log[5]),
+            "params": json.loads(log[6]),
+            "body": log[7],
+            "mime_type": log[8],
+            "file_name": log[9],
+            "original_file_name": log[10],
+            "file_content": log[11],
+            "path": log[12]
         })
 
     return jsonify(formatted_logs)
@@ -279,6 +322,7 @@ def view_logs():
     </head>
     <body>
         <h2>Captured Logs</h2>
+        <a href="/uploadfiles">Upload a File</a> <a href="/rawsql">Raw Query</a> 
         <table id="logsTable" class="display">
             <thead>
                 <tr>
@@ -287,6 +331,8 @@ def view_logs():
                     <th>Method</th>
                     <th>Path</th>
                     <th>Headers</th>
+                    <th>Internal IP</th>
+                    <th>External IP</th>
                     <th>URL Params</th>
                     <th>Body (partial)</th>
                     <th>Original Filename</th>
@@ -309,7 +355,7 @@ def view_logs():
 
                 let fileDisplay = "";
                 if (row.file_name) { 
-                    if (row.mime_type.startsWith('image/')) {
+                    if (row.mime_type && row.mime_type.startsWith('image/')) {
                         fileDisplay = `<img src="${row.file_name}" alt="${row.original_file_name}" style="max-width: 200px; max-height: 200px;">`;
                     } else {
                         fileDisplay = `<a href="${row.file_name}" target="_blank"> ${row.original_file_name} </a>`; // Show download link for binary files
@@ -324,6 +370,8 @@ def view_logs():
                     row.method,
                     row.path,
                     headerStr,
+                    row.internal_ip,
+                    row.external_ip,
                     paramStr,
                     bodyStr,
                     row.original_file_name || "",
@@ -339,6 +387,94 @@ def view_logs():
     </body>
     </html>
     ''')
+
+@app.route('/rawsql', methods=['GET','POST'])
+@requires_auth
+def view_rawsql():
+    return render_template_string('''
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raw SQL Query</title>
+    <script src="/static/jquery.min.js"></script>
+    <script src="/static/datatables.min.js"></script>
+    <link rel="stylesheet" href="/static/datatables.min.css">
+</head>
+
+<body>
+    <h2>Raw SQL Query</h2>
+    <a href="/view">Main View</a> <a href="/uploadfiles">Upload a File</a>
+    <br>
+    <textarea name="sql_query" rows="5" cols="80">select * from logs</textarea><br>
+    <input type="submit" value="Execute Query" id="queryButton">
+
+    <br>
+    Sample Queries:<br />
+    <textarea rows="5" cols="80">
+Delete Everything: DROP * from logs               
+Tag via IP address:                
+        </textarea>
+    <table id="resultsTable" class="display">
+        <thead></thead>
+        <tbody></tbody>
+    </table>
+
+    <script>
+        $(document).ready(function () {
+            $('#queryButton').click(function (event) {
+
+
+                function renderTable(xhrdata) {
+                    var cols = [];
+                    var exampleRecord = xhrdata[0];
+                    var keys = Object.keys(exampleRecord);
+                    keys.forEach(function (k) {
+                        cols.push({
+                            title: k,
+                            data: k
+                            //optionally do some type detection here for render function
+                        });
+                    });
+                    
+                    // delete and recreate the table
+                    $('#resultsTable').replaceWith('<table id="resultsTable" class="display"><thead></thead><tbody></tbody></table>');
+
+                    // Make this table variable globally accessible
+                    var table = $('#resultsTable').DataTable({
+                        retrieve: true,
+                        columns: cols
+                    });
+                    table.rows.add(xhrdata).draw();
+                }
+
+                // Get the query
+                var sqlQuery = $('textarea[name="sql_query"]').val();
+
+                //xhr call to retrieve data
+                var xhrcall = $.ajax({
+                    type: 'POST',
+                    url: '/logs_sql',
+                    data: { sql_query: sqlQuery },
+                    success: function (data) {
+                        //promise syntax to render after xhr completes
+                        xhrcall.done(renderTable);
+                    }
+                });
+
+
+
+            });
+
+        });             
+    </script>
+
+</body>
+
+</html>
+''')
 
 if __name__ == "__main__":
     os.makedirs(UPLOADS_DIR, exist_ok=True)
